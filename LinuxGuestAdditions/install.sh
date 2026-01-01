@@ -129,16 +129,78 @@ install_package() {
     return 0
 }
 
+# Detect if running KDE Plasma Wayland
+is_kde_wayland() {
+    local de="${XDG_CURRENT_DESKTOP:-}"
+    local session="${XDG_SESSION_TYPE:-}"
+
+    if [[ -n "${WAYLAND_DISPLAY:-}" ]] && [[ "$de" == *"KDE"* || "$de" == *"plasma"* ]]; then
+        return 0
+    fi
+    return 1
+}
+
+# Check if vdagent has KWin support
+vdagent_has_kwin_support() {
+    # Check if our patched version is installed by looking for the KWin protocol files
+    if [[ -f /usr/share/spice-vdagent/kde-output-management-v2.xml ]] || \
+       strings /usr/bin/spice-vdagent 2>/dev/null | grep -q "kde_output_management_v2"; then
+        return 0
+    fi
+    return 1
+}
+
 # Install spice-vdagent for dynamic resolution support
 install_spice_vdagent() {
     log_step "Setting up dynamic resolution support..."
 
+    local need_kde_patch=false
+
+    # Check if on KDE Plasma Wayland
+    if is_kde_wayland; then
+        log "Detected KDE Plasma Wayland session"
+        need_kde_patch=true
+    fi
+
     if command -v spice-vdagent &>/dev/null; then
         log_success "spice-vdagent already installed"
+
+        # Check if it has KWin support
+        if $need_kde_patch && ! vdagent_has_kwin_support; then
+            log_warning "Installed spice-vdagent lacks native KDE Wayland support"
+            echo ""
+            echo -e "${YELLOW}The stock spice-vdagent does not support KDE Plasma Wayland natively.${NC}"
+            echo "VirtualBuddy provides a patched version with native KDE support."
+            echo ""
+            echo "Options:"
+            echo "  1. Build patched spice-vdagent (recommended for KDE)"
+            echo "  2. Use stock version with virtualbuddy-resolution fallback"
+            echo ""
+            read -p "Build patched version? [y/N] " -n 1 -r
+            echo
+
+            if [[ $REPLY =~ ^[Yy]$ ]]; then
+                build_patched_vdagent
+            else
+                log "Using stock spice-vdagent with fallback support"
+            fi
+        fi
     else
         log "Installing spice-vdagent..."
         if install_package "spice-vdagent" "spice-vdagent" "spice-vdagent" "spice-vdagent"; then
             log_success "Installed spice-vdagent"
+
+            # Offer patched version for KDE
+            if $need_kde_patch; then
+                echo ""
+                echo -e "${YELLOW}For native KDE Wayland resolution support, you can build the patched version.${NC}"
+                read -p "Build patched spice-vdagent with KDE support? [y/N] " -n 1 -r
+                echo
+
+                if [[ $REPLY =~ ^[Yy]$ ]]; then
+                    build_patched_vdagent
+                fi
+            fi
         else
             log_warning "Could not install spice-vdagent automatically"
             log_warning "For dynamic resolution, install it manually:"
@@ -162,6 +224,49 @@ install_spice_vdagent() {
     fi
 
     echo ""
+}
+
+# Build and install patched spice-vdagent with KDE support
+build_patched_vdagent() {
+    log_step "Building patched spice-vdagent with KDE Wayland support..."
+
+    # Check for build script
+    if [[ -f "$SCRIPT_DIR/build-vdagent.sh" ]]; then
+        # Install build dependencies first
+        log "Installing build dependencies..."
+        local pkg_manager
+        pkg_manager=$(detect_package_manager)
+
+        case "$pkg_manager" in
+            dnf)
+                dnf install -y git gcc automake autoconf libtool pkgconfig \
+                    glib2-devel libdrm-devel libX11-devel libXfixes-devel libXrandr-devel \
+                    libXinerama-devel alsa-lib-devel dbus-devel systemd-devel \
+                    spice-protocol wayland-devel wayland-protocols-devel pciaccess-devel \
+                    gtk3-devel 2>/dev/null || log_warning "Some build deps may be missing"
+                ;;
+            apt)
+                apt-get install -y git build-essential automake autoconf libtool pkg-config \
+                    libglib2.0-dev libdrm-dev libx11-dev libxfixes-dev libxrandr-dev \
+                    libxinerama-dev libasound2-dev libdbus-1-dev libsystemd-dev \
+                    libspice-protocol-dev libwayland-dev wayland-protocols \
+                    libpciaccess-dev libgtk-3-dev 2>/dev/null || log_warning "Some build deps may be missing"
+                ;;
+            *)
+                log_warning "Please install build dependencies manually"
+                ;;
+        esac
+
+        # Run the build script
+        if bash "$SCRIPT_DIR/build-vdagent.sh" --all; then
+            log_success "Patched spice-vdagent installed successfully"
+        else
+            log_warning "Build failed, falling back to stock version"
+        fi
+    else
+        log_warning "build-vdagent.sh not found in $SCRIPT_DIR"
+        log "You can build manually from: https://github.com/user/spice-vdagent"
+    fi
 }
 
 check_dependencies() {
