@@ -93,10 +93,10 @@ get_wayland_output() {
         return
     fi
 
-    # KDE Plasma
+    # KDE Plasma - extract the output number (e.g., "1" from "Output: 1 Virtual-1")
     if [[ "$de" == *"kde"* ]] || [[ "$de" == *"plasma"* ]]; then
         if command -v kscreen-doctor &>/dev/null; then
-            kscreen-doctor -o 2>/dev/null | grep -oP 'Output: \d+ \K\S+' | head -1
+            kscreen-doctor -o 2>/dev/null | grep -oP 'Output: \K\d+' | head -1
             return
         fi
     fi
@@ -331,13 +331,25 @@ set_resolution_kde_wayland() {
         return 1
     fi
 
-    # Try with refresh rate
+    # Try to find the mode index for this resolution (preferred mode with !)
+    local mode_index
+    mode_index=$(kscreen-doctor -o 2>/dev/null | grep -oP '\d+(?=:'${resolution}'@[0-9.]+!)' | head -1 || true)
+
+    if [[ -n "$mode_index" ]]; then
+        log "Found mode index $mode_index for $resolution"
+        kscreen-doctor output."$output".mode."$mode_index" 2>/dev/null && {
+            log_success "Resolution set to $resolution (mode $mode_index)"
+            return 0
+        }
+    fi
+
+    # Fallback: Try with refresh rate
     kscreen-doctor output."$output".mode."${resolution}@60" 2>/dev/null && {
         log_success "Resolution set to $resolution"
         return 0
     }
 
-    # Try without refresh rate
+    # Fallback: Try without refresh rate
     kscreen-doctor output."$output".mode."${resolution}" 2>/dev/null && {
         log_success "Resolution set to $resolution"
         return 0
@@ -530,17 +542,52 @@ monitor_wayland_polling() {
     local de
     de=$(detect_desktop_environment)
 
+    # For KDE Wayland, track the preferred mode (the one with !)
+    local last_preferred=""
+
     while true; do
         sleep "$POLL_INTERVAL"
 
-        # Check for spice-vdagent errors in recent logs
+        # Check for spice-vdagent errors in recent logs (system and user level)
+        local error_detected=false
         if journalctl -u spice-vdagentd --since "5 seconds ago" --no-pager 2>/dev/null | grep -q "invalid message size"; then
+            error_detected=true
+        fi
+        # Also check user-level spice-vdagent logs for Mutter errors (indicates KDE/non-GNOME)
+        if journalctl --user -u spice-vdagent --since "5 seconds ago" --no-pager 2>/dev/null | grep -q "mutter"; then
+            error_detected=true
+        fi
+
+        if [[ "$error_detected" == "true" ]]; then
             log_warning "Detected spice-vdagent error, triggering display refresh..."
 
             if [[ "$de" == *"gnome"* ]]; then
                 set_resolution_gnome_wayland "auto" 2>/dev/null || true
             elif [[ "$de" == *"kde"* ]] || [[ "$de" == *"plasma"* ]]; then
                 auto_resolution 2>/dev/null || true
+            fi
+        fi
+
+        # For KDE Wayland: Check if preferred mode changed (VirtualBuddy sets this on resize)
+        if [[ "$de" == *"kde"* ]] || [[ "$de" == *"plasma"* ]] || [[ "$de" == *"KDE"* ]]; then
+            if command -v kscreen-doctor &>/dev/null; then
+                # The mode with ! is the preferred mode from the host
+                local preferred
+                preferred=$(kscreen-doctor -o 2>/dev/null | grep -oP '\d+:\K\d+x\d+(?=@[0-9.]+!)' | head -1 || true)
+
+                if [[ -z "$preferred" ]]; then
+                    # Debug: No preferred mode found
+                    :
+                elif [[ "$preferred" != "$last_preferred" ]]; then
+                    if [[ -n "$last_preferred" ]]; then
+                        log "Preferred mode changed: $last_preferred -> $preferred"
+                        log "Applying new resolution..."
+                        set_resolution_kde_wayland "$preferred" 2>/dev/null || true
+                    else
+                        log "Initial preferred mode: $preferred"
+                    fi
+                    last_preferred="$preferred"
+                fi
             fi
         fi
 
