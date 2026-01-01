@@ -2,9 +2,17 @@
 #
 # VirtualBuddy Linux Guest Additions - Resolution Helper Script
 #
-# This script provides resolution handling for both X11 and Wayland sessions.
-# It monitors for spice-vdagent issues and applies fallback fixes, and also
-# provides manual resolution control commands.
+# FALLBACK SCRIPT: This script provides resolution handling when spice-vdagent
+# does not have native support for your desktop environment.
+#
+# For KDE Plasma Wayland: If you've installed the patched spice-vdagent with
+# native KWin support (via build-vdagent.sh), you don't need this script.
+# The patched vdagent handles KDE resolution changes automatically.
+#
+# This script provides:
+# - Polling-based resolution monitoring for KDE Wayland (when using stock vdagent)
+# - X11 resolution fixing via xrandr
+# - Manual resolution control commands
 #
 # Usage:
 #   virtualbuddy-resolution              # Run in monitor mode (for systemd)
@@ -12,6 +20,7 @@
 #   virtualbuddy-resolution --auto       # Auto-detect and apply best resolution
 #   virtualbuddy-resolution --list       # List available resolutions
 #   virtualbuddy-resolution --watch      # Watch mode (poll for changes)
+#   virtualbuddy-resolution --status     # Check if native vdagent support is available
 #
 
 set -euo pipefail
@@ -680,6 +689,77 @@ show_help() {
     echo ""
 }
 
+# Check vdagent status and native support
+check_vdagent_status() {
+    echo -e "${BOLD}VirtualBuddy Resolution Status${NC}"
+    echo ""
+
+    # Display environment
+    echo -e "${CYAN}Environment:${NC}"
+    echo "  Display server: $(detect_display_server)"
+    echo "  Desktop environment: $(detect_desktop_environment)"
+    echo "  Current resolution: $(get_current_resolution 2>/dev/null || echo 'unknown')"
+    echo ""
+
+    # Check spice-vdagent
+    echo -e "${CYAN}spice-vdagent:${NC}"
+    if command -v spice-vdagent &>/dev/null; then
+        local version
+        version=$(spice-vdagent --help 2>&1 | head -1 || echo "unknown")
+        echo "  Installed: yes"
+        echo "  Version: $version"
+
+        # Check for KWin/KDE native support
+        if strings /usr/bin/spice-vdagent 2>/dev/null | grep -q "kde_output_management_v2"; then
+            echo -e "  ${GREEN}KDE Wayland support: YES (native)${NC}"
+            echo ""
+            echo -e "${GREEN}Your spice-vdagent has native KDE Wayland support!${NC}"
+            echo "This script is only needed as a fallback."
+        else
+            echo -e "  ${YELLOW}KDE Wayland support: NO (stock version)${NC}"
+
+            local de
+            de=$(detect_desktop_environment)
+            if [[ "$de" == *"kde"* ]] || [[ "$de" == *"plasma"* ]]; then
+                echo ""
+                echo -e "${YELLOW}You're running KDE Plasma without native vdagent support.${NC}"
+                echo "Options:"
+                echo "  1. Build patched spice-vdagent with KDE support:"
+                echo "     sudo /path/to/build-vdagent.sh --all"
+                echo "  2. Use this script as a fallback (polling-based)"
+            fi
+        fi
+    else
+        echo -e "  ${RED}Installed: no${NC}"
+        echo ""
+        echo "Install spice-vdagent for dynamic resolution support:"
+        echo "  Fedora: sudo dnf install spice-vdagent"
+        echo "  Ubuntu: sudo apt install spice-vdagent"
+    fi
+    echo ""
+
+    # Check services
+    echo -e "${CYAN}Services:${NC}"
+    if systemctl is-active --quiet spice-vdagentd 2>/dev/null; then
+        echo -e "  spice-vdagentd: ${GREEN}running${NC}"
+    else
+        echo -e "  spice-vdagentd: ${RED}not running${NC}"
+    fi
+
+    if systemctl --user is-active --quiet spice-vdagent 2>/dev/null; then
+        echo -e "  spice-vdagent (user): ${GREEN}running${NC}"
+    else
+        echo -e "  spice-vdagent (user): ${YELLOW}not running${NC}"
+    fi
+
+    if systemctl --user is-active --quiet virtualbuddy-resolution 2>/dev/null; then
+        echo -e "  virtualbuddy-resolution: ${GREEN}running${NC}"
+    else
+        echo -e "  virtualbuddy-resolution: ${CYAN}not running (fallback service)${NC}"
+    fi
+    echo ""
+}
+
 # Main
 main() {
     case "${1:-}" in
@@ -702,6 +782,9 @@ main() {
             ;;
         --watch)
             watch_mode
+            ;;
+        --status)
+            check_vdagent_status
             ;;
         --version)
             echo "virtualbuddy-resolution version $VERSION"
