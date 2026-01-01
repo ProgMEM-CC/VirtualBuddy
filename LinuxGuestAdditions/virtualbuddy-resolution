@@ -1,23 +1,24 @@
 #!/bin/bash
 #
-# VirtualBuddy Linux Guest Additions - Resolution Fallback Script
+# VirtualBuddy Linux Guest Additions - Resolution Helper Script
 #
-# This script provides fallback resolution handling when spice-vdagent
-# encounters issues with the SPICE protocol. It monitors for vdagent
-# errors and applies xrandr fixes automatically.
-#
-# It also provides manual resolution commands for non-GNOME desktops.
+# This script provides resolution handling for both X11 and Wayland sessions.
+# It monitors for spice-vdagent issues and applies fallback fixes, and also
+# provides manual resolution control commands.
 #
 # Usage:
 #   virtualbuddy-resolution              # Run in monitor mode (for systemd)
 #   virtualbuddy-resolution --set WxH    # Set resolution manually
 #   virtualbuddy-resolution --auto       # Auto-detect and apply best resolution
 #   virtualbuddy-resolution --list       # List available resolutions
+#   virtualbuddy-resolution --watch      # Watch mode (poll for changes)
 #
 
 set -euo pipefail
 
 VERSION="1.3.0"
+POLL_INTERVAL="${VIRTUALBUDDY_POLL_INTERVAL:-2}"  # seconds between polls in watch mode
+STATE_FILE="/tmp/virtualbuddy-resolution-state"
 
 # Colors for terminal output (disabled if not a TTY)
 if [[ -t 1 ]]; then
@@ -81,6 +82,39 @@ get_x11_output() {
     fi
 }
 
+# Get Wayland output name based on compositor
+get_wayland_output() {
+    local de
+    de=$(detect_desktop_environment)
+
+    # wlroots-based (Sway, Hyprland, etc.)
+    if command -v wlr-randr &>/dev/null; then
+        wlr-randr 2>/dev/null | grep -oP '^\S+' | head -1
+        return
+    fi
+
+    # KDE Plasma
+    if [[ "$de" == *"kde"* ]] || [[ "$de" == *"plasma"* ]]; then
+        if command -v kscreen-doctor &>/dev/null; then
+            kscreen-doctor -o 2>/dev/null | grep -oP 'Output: \d+ \K\S+' | head -1
+            return
+        fi
+    fi
+
+    # GNOME - get output via gdbus
+    if [[ "$de" == *"gnome"* ]]; then
+        # Try to get from Mutter's DisplayConfig
+        gdbus call --session \
+            --dest org.gnome.Mutter.DisplayConfig \
+            --object-path /org/gnome/Mutter/DisplayConfig \
+            --method org.gnome.Mutter.DisplayConfig.GetCurrentState 2>/dev/null | \
+            grep -oP "'[A-Z]+-\d+'" | head -1 | tr -d "'" || echo "Virtual-1"
+        return
+    fi
+
+    echo "Virtual-1"
+}
+
 # Get current resolution
 get_current_resolution() {
     local display_server
@@ -93,16 +127,44 @@ get_current_resolution() {
             fi
             ;;
         wayland)
-            # Try various Wayland tools
+            local de
+            de=$(detect_desktop_environment)
+
+            # wlroots-based
             if command -v wlr-randr &>/dev/null; then
-                wlr-randr 2>/dev/null | grep "current" | head -1 | awk '{print $1}'
-            elif command -v gnome-randr &>/dev/null; then
-                gnome-randr 2>/dev/null | grep "current" | head -1 | awk '{print $1}'
-            elif command -v kscreen-doctor &>/dev/null; then
+                wlr-randr 2>/dev/null | grep -oP '\d+x\d+' | head -1
+                return
+            fi
+
+            # GNOME - use gdbus to query Mutter
+            if [[ "$de" == *"gnome"* ]]; then
+                gdbus call --session \
+                    --dest org.gnome.Mutter.DisplayConfig \
+                    --object-path /org/gnome/Mutter/DisplayConfig \
+                    --method org.gnome.Mutter.DisplayConfig.GetCurrentState 2>/dev/null | \
+                    grep -oP '\d{3,4}, \d{3,4}' | head -1 | sed 's/, /x/' || true
+                return
+            fi
+
+            # KDE Plasma
+            if command -v kscreen-doctor &>/dev/null; then
                 kscreen-doctor -o 2>/dev/null | grep -oP '\d+x\d+' | head -1
+                return
             fi
             ;;
     esac
+}
+
+# Get the viewport/window size that SPICE reports (if available)
+get_spice_viewport_size() {
+    # Check spice-vdagent logs for the last resolution request
+    local last_request
+    last_request=$(journalctl -u spice-vdagentd --no-pager -n 50 2>/dev/null | \
+        grep -oP 'width=\K\d+|height=\K\d+' | tail -2 | tr '\n' 'x' | sed 's/x$//')
+
+    if [[ -n "$last_request" ]] && [[ "$last_request" =~ ^[0-9]+x[0-9]+$ ]]; then
+        echo "$last_request"
+    fi
 }
 
 # List available resolutions
@@ -126,14 +188,21 @@ list_resolutions() {
             fi
             ;;
         wayland)
+            local de
+            de=$(detect_desktop_environment)
+
             if command -v wlr-randr &>/dev/null; then
                 wlr-randr 2>/dev/null
-            elif command -v gnome-randr &>/dev/null; then
-                gnome-randr 2>/dev/null
             elif command -v kscreen-doctor &>/dev/null; then
                 kscreen-doctor -o 2>/dev/null
+            elif [[ "$de" == *"gnome"* ]]; then
+                echo "GNOME Wayland - use Settings > Displays to see available modes"
+                echo "Or install gnome-randr: pip install gnome-randr"
+                echo ""
+                echo "Current resolution: $(get_current_resolution)"
             else
-                log_error "No Wayland resolution tool found (wlr-randr, gnome-randr, or kscreen-doctor)"
+                log_error "No Wayland resolution tool found"
+                echo "Install one of: wlr-randr, kscreen-doctor, or gnome-randr"
             fi
             ;;
         none)
@@ -167,7 +236,7 @@ set_resolution_x11() {
     fi
 
     # Try to create the mode if it doesn't exist
-    log "Mode $resolution not found, attempting to create it..."
+    log "Mode $resolution not found, creating custom mode..."
 
     if command -v cvt &>/dev/null; then
         local modeline
@@ -191,7 +260,129 @@ set_resolution_x11() {
     return 1
 }
 
-# Set resolution on Wayland
+# Set resolution on GNOME Wayland using gdbus
+set_resolution_gnome_wayland() {
+    local resolution="$1"
+    local width height
+    width=$(echo "$resolution" | cut -d'x' -f1)
+    height=$(echo "$resolution" | cut -d'x' -f2)
+
+    log "Setting GNOME Wayland resolution to $resolution..."
+
+    # Try gnome-randr first (if installed)
+    if command -v gnome-randr &>/dev/null; then
+        gnome-randr modify --mode "$resolution" 2>/dev/null && {
+            log_success "Resolution set to $resolution via gnome-randr"
+            return 0
+        }
+    fi
+
+    # Try using gsettings to trigger a display reconfiguration
+    # This works by toggling a setting that forces GNOME to re-evaluate displays
+    if command -v gsettings &>/dev/null; then
+        # Get current scaling
+        local current_scale
+        current_scale=$(gsettings get org.gnome.desktop.interface text-scaling-factor 2>/dev/null || echo "1.0")
+
+        # Briefly change and restore to trigger reconfiguration
+        gsettings set org.gnome.desktop.interface text-scaling-factor 1.01 2>/dev/null || true
+        sleep 0.2
+        gsettings set org.gnome.desktop.interface text-scaling-factor "$current_scale" 2>/dev/null || true
+
+        log_success "Triggered GNOME display reconfiguration"
+        return 0
+    fi
+
+    # Try using dbus-send to trigger the display config
+    if command -v gdbus &>/dev/null; then
+        # Signal Mutter to apply current configuration
+        gdbus call --session \
+            --dest org.gnome.Mutter.DisplayConfig \
+            --object-path /org/gnome/Mutter/DisplayConfig \
+            --method org.gnome.Mutter.DisplayConfig.ApplyMonitorsConfig \
+            0 1 "[]" "[]" 2>/dev/null && {
+            log_success "Triggered Mutter display reconfiguration"
+            return 0
+        }
+    fi
+
+    log_warning "Could not set resolution directly on GNOME Wayland"
+    log "GNOME should handle SPICE resolution changes automatically"
+    log "If not working, try: Settings > Displays"
+    return 1
+}
+
+# Set resolution on KDE Plasma Wayland
+set_resolution_kde_wayland() {
+    local resolution="$1"
+
+    if ! command -v kscreen-doctor &>/dev/null; then
+        log_error "kscreen-doctor not found. Install it with: sudo dnf install kscreen"
+        return 1
+    fi
+
+    log "Setting KDE Plasma resolution to $resolution..."
+
+    local output
+    output=$(get_wayland_output)
+
+    if [[ -z "$output" ]]; then
+        log_error "Could not detect KDE output"
+        return 1
+    fi
+
+    # Try with refresh rate
+    kscreen-doctor output."$output".mode."${resolution}@60" 2>/dev/null && {
+        log_success "Resolution set to $resolution"
+        return 0
+    }
+
+    # Try without refresh rate
+    kscreen-doctor output."$output".mode."${resolution}" 2>/dev/null && {
+        log_success "Resolution set to $resolution"
+        return 0
+    }
+
+    log_error "Failed to set KDE resolution"
+    return 1
+}
+
+# Set resolution on wlroots-based compositors (Sway, Hyprland, etc.)
+set_resolution_wlroots() {
+    local resolution="$1"
+
+    if ! command -v wlr-randr &>/dev/null; then
+        log_error "wlr-randr not found. Install it from your package manager"
+        return 1
+    fi
+
+    log "Setting wlroots resolution to $resolution..."
+
+    local output
+    output=$(get_wayland_output)
+
+    if [[ -z "$output" ]]; then
+        log_error "Could not detect wlroots output"
+        return 1
+    fi
+
+    # Try custom mode first (for arbitrary resolutions)
+    wlr-randr --output "$output" --custom-mode "$resolution" 2>/dev/null && {
+        log_success "Resolution set to $resolution (custom mode)"
+        return 0
+    }
+
+    # Try standard mode
+    wlr-randr --output "$output" --mode "$resolution" 2>/dev/null && {
+        log_success "Resolution set to $resolution"
+        return 0
+    }
+
+    log_error "Failed to set wlroots resolution"
+    return 1
+}
+
+# Set resolution on Wayland (auto-detect compositor)
 set_resolution_wayland() {
     local resolution="$1"
     local de
@@ -199,49 +390,26 @@ set_resolution_wayland() {
 
     log "Detected desktop environment: $de"
 
+    # wlroots-based compositors (Sway, Hyprland, etc.)
+    if command -v wlr-randr &>/dev/null; then
+        set_resolution_wlroots "$resolution"
+        return $?
+    fi
+
     # GNOME
-    if [[ "$de" == *"gnome"* ]] && command -v gnome-randr &>/dev/null; then
-        log "Using gnome-randr..."
-        gnome-randr modify --mode "$resolution" 2>/dev/null && {
-            log_success "Resolution set to $resolution"
-            return 0
-        }
+    if [[ "$de" == *"gnome"* ]]; then
+        set_resolution_gnome_wayland "$resolution"
+        return $?
     fi
 
     # KDE Plasma
     if [[ "$de" == *"kde"* ]] || [[ "$de" == *"plasma"* ]]; then
-        if command -v kscreen-doctor &>/dev/null; then
-            log "Using kscreen-doctor..."
-            local output
-            output=$(kscreen-doctor -o 2>/dev/null | grep -oP 'Output: \d+ \K\S+' | head -1)
-            if [[ -n "$output" ]]; then
-                kscreen-doctor output."$output".mode."${resolution}@60" 2>/dev/null && {
-                    log_success "Resolution set to $resolution"
-                    return 0
-                }
-            fi
-        fi
+        set_resolution_kde_wayland "$resolution"
+        return $?
     fi
 
-    # wlroots-based compositors (Sway, Hyprland, etc.)
-    if command -v wlr-randr &>/dev/null; then
-        log "Using wlr-randr..."
-        local output
-        output=$(wlr-randr 2>/dev/null | grep -oP '^\S+' | head -1)
-        if [[ -n "$output" ]]; then
-            wlr-randr --output "$output" --custom-mode "$resolution" 2>/dev/null && {
-                log_success "Resolution set to $resolution"
-                return 0
-            }
-            # Try without custom-mode
-            wlr-randr --output "$output" --mode "$resolution" 2>/dev/null && {
-                log_success "Resolution set to $resolution"
-                return 0
-            }
-        fi
-    fi
-
-    log_error "Could not set Wayland resolution. Try installing gnome-randr, kscreen-doctor, or wlr-randr."
+    log_error "Could not detect Wayland compositor type"
+    log "Supported: GNOME, KDE Plasma, Sway, Hyprland, and other wlroots compositors"
     return 1
 }
 
@@ -272,7 +440,7 @@ set_resolution() {
     esac
 }
 
-# Auto-detect and apply resolution based on xrandr --auto
+# Auto-detect and apply resolution
 auto_resolution() {
     local display_server
     display_server=$(detect_display_server)
@@ -290,12 +458,35 @@ auto_resolution() {
                     return 0
                 }
             fi
-            log_error "Failed to auto-configure resolution"
+            log_error "Failed to auto-configure X11 resolution"
             return 1
             ;;
         wayland)
-            log_warning "Auto-resolution not supported on Wayland"
-            log "Use --set WxH to set a specific resolution"
+            local de
+            de=$(detect_desktop_environment)
+
+            # For GNOME, trigger a display reconfiguration
+            if [[ "$de" == *"gnome"* ]]; then
+                log "Triggering GNOME display auto-configuration..."
+                set_resolution_gnome_wayland "auto"
+                return $?
+            fi
+
+            # For KDE, use kscreen-doctor
+            if [[ "$de" == *"kde"* ]] || [[ "$de" == *"plasma"* ]]; then
+                if command -v kscreen-doctor &>/dev/null; then
+                    log "Triggering KDE display auto-configuration..."
+                    local output
+                    output=$(get_wayland_output)
+                    kscreen-doctor output."$output".enable 2>/dev/null && {
+                        log_success "Triggered KDE display reconfiguration"
+                        return 0
+                    }
+                fi
+            fi
+
+            log_warning "Auto-resolution on Wayland depends on compositor"
+            log "Try resizing the VirtualBuddy window"
             return 1
             ;;
         none)
@@ -305,22 +496,9 @@ auto_resolution() {
     esac
 }
 
-# Monitor spice-vdagentd for errors and apply fixes
-monitor_vdagent() {
-    log "Starting spice-vdagent error monitor..."
-    log "Will apply xrandr fix when protocol errors are detected"
-
-    # Wait a bit for the desktop to fully initialize
-    sleep 3
-
-    local display_server
-    display_server=$(detect_display_server)
-
-    if [[ "$display_server" != "x11" ]]; then
-        log "Monitor mode only works on X11 (detected: $display_server)"
-        log "For Wayland, spice-vdagent should work automatically with your compositor"
-        exit 0
-    fi
+# Monitor spice-vdagentd for errors and apply fixes (X11)
+monitor_vdagent_x11() {
+    log "Starting X11 spice-vdagent monitor..."
 
     # Monitor journalctl for spice-vdagentd errors
     journalctl -fu spice-vdagentd --no-pager 2>/dev/null | while read -r line; do
@@ -328,7 +506,6 @@ monitor_vdagent() {
             log_warning "Detected spice-vdagent protocol error"
             log "Applying xrandr workaround..."
 
-            # Small delay to let things settle
             sleep 0.5
 
             local output
@@ -344,6 +521,88 @@ monitor_vdagent() {
     done
 }
 
+# Monitor for resolution changes on Wayland (using polling)
+monitor_wayland_polling() {
+    log "Starting Wayland resolution monitor (polling mode)..."
+    log "Poll interval: ${POLL_INTERVAL}s"
+
+    local last_resolution=""
+    local de
+    de=$(detect_desktop_environment)
+
+    while true; do
+        sleep "$POLL_INTERVAL"
+
+        # Check for spice-vdagent errors in recent logs
+        if journalctl -u spice-vdagentd --since "5 seconds ago" --no-pager 2>/dev/null | grep -q "invalid message size"; then
+            log_warning "Detected spice-vdagent error, triggering display refresh..."
+
+            if [[ "$de" == *"gnome"* ]]; then
+                set_resolution_gnome_wayland "auto" 2>/dev/null || true
+            elif [[ "$de" == *"kde"* ]] || [[ "$de" == *"plasma"* ]]; then
+                auto_resolution 2>/dev/null || true
+            fi
+        fi
+
+        # Check if resolution changed
+        local current_res
+        current_res=$(get_current_resolution 2>/dev/null || echo "unknown")
+
+        if [[ -n "$current_res" ]] && [[ "$current_res" != "$last_resolution" ]]; then
+            if [[ -n "$last_resolution" ]]; then
+                log "Resolution changed: $last_resolution -> $current_res"
+            fi
+            last_resolution="$current_res"
+            echo "$current_res" > "$STATE_FILE" 2>/dev/null || true
+        fi
+    done
+}
+
+# Main monitor function
+monitor_vdagent() {
+    log "Starting spice-vdagent monitor..."
+
+    # Wait for desktop to initialize
+    sleep 3
+
+    local display_server
+    display_server=$(detect_display_server)
+    local de
+    de=$(detect_desktop_environment)
+
+    log "Display server: $display_server"
+    log "Desktop environment: $de"
+
+    case "$display_server" in
+        x11)
+            monitor_vdagent_x11
+            ;;
+        wayland)
+            log "Wayland detected - using polling mode for fallback"
+            monitor_wayland_polling
+            ;;
+        none)
+            log_error "No display server detected"
+            exit 1
+            ;;
+    esac
+}
+
+# Watch mode - continuously monitor and apply resolution changes
+watch_mode() {
+    log "Starting watch mode..."
+    log "This will continuously monitor for resolution change requests"
+
+    local display_server
+    display_server=$(detect_display_server)
+
+    if [[ "$display_server" == "wayland" ]]; then
+        monitor_wayland_polling
+    else
+        monitor_vdagent_x11
+    fi
+}
+
 # Show help
 show_help() {
     echo "VirtualBuddy Resolution Helper v$VERSION"
@@ -352,9 +611,10 @@ show_help() {
     echo ""
     echo "Options:"
     echo "  --set WxH     Set resolution (e.g., --set 1920x1080)"
-    echo "  --auto        Auto-detect and apply best resolution (X11 only)"
+    echo "  --auto        Auto-detect and apply best resolution"
     echo "  --list        List available resolutions"
     echo "  --monitor     Monitor spice-vdagent for errors (for systemd service)"
+    echo "  --watch       Watch mode with polling (works on both X11 and Wayland)"
     echo "  --version     Show version"
     echo "  --help        Show this help"
     echo ""
@@ -363,9 +623,13 @@ show_help() {
     echo "  virtualbuddy-resolution --auto"
     echo "  virtualbuddy-resolution --list"
     echo ""
-    echo "Display server: $(detect_display_server)"
-    echo "Desktop environment: $(detect_desktop_environment)"
-    echo "Current resolution: $(get_current_resolution)"
+    echo "Environment Variables:"
+    echo "  VIRTUALBUDDY_POLL_INTERVAL  Polling interval in seconds (default: 2)"
+    echo ""
+    echo "Current Status:"
+    echo "  Display server: $(detect_display_server)"
+    echo "  Desktop environment: $(detect_desktop_environment)"
+    echo "  Current resolution: $(get_current_resolution 2>/dev/null || echo 'unknown')"
     echo ""
 }
 
@@ -388,6 +652,9 @@ main() {
             ;;
         --monitor)
             monitor_vdagent
+            ;;
+        --watch)
+            watch_mode
             ;;
         --version)
             echo "virtualbuddy-resolution version $VERSION"
