@@ -16,7 +16,7 @@
 
 set -euo pipefail
 
-VERSION="1.2.0"
+VERSION="1.3.0"
 DRY_RUN=false
 VERBOSE=false
 STATUS_FILE="/var/run/virtualbuddy-growfs.status"

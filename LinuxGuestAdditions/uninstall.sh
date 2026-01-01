@@ -75,6 +75,12 @@ main() {
         log_success "Disabled notification service"
     fi
 
+    # Disable the resolution fallback service globally
+    if systemctl --global is-enabled virtualbuddy-resolution.service &>/dev/null 2>&1; then
+        systemctl --global disable virtualbuddy-resolution.service 2>/dev/null || true
+        log_success "Disabled resolution service"
+    fi
+
     echo ""
     log_step "Removing files..."
 
@@ -84,10 +90,15 @@ main() {
         log_success "Removed growfs service file"
     fi
 
-    # Remove user service file
+    # Remove user service files
     if [[ -f /etc/systemd/user/virtualbuddy-notify.service ]]; then
         rm -f /etc/systemd/user/virtualbuddy-notify.service
         log_success "Removed notification service file"
+    fi
+
+    if [[ -f /etc/systemd/user/virtualbuddy-resolution.service ]]; then
+        rm -f /etc/systemd/user/virtualbuddy-resolution.service
+        log_success "Removed resolution service file"
     fi
 
     # Remove scripts
@@ -99,6 +110,11 @@ main() {
     if [[ -f /usr/local/bin/virtualbuddy-notify ]]; then
         rm -f /usr/local/bin/virtualbuddy-notify
         log_success "Removed virtualbuddy-notify"
+    fi
+
+    if [[ -f /usr/local/bin/virtualbuddy-resolution ]]; then
+        rm -f /usr/local/bin/virtualbuddy-resolution
+        log_success "Removed virtualbuddy-resolution"
     fi
 
     # Remove status file

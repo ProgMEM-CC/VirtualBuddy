@@ -1,0 +1,17 @@
+[Unit]
+Description=VirtualBuddy Guest Additions - Resolution Fallback Monitor
+Documentation=https://github.com/insidegui/VirtualBuddy
+After=graphical-session.target spice-vdagentd.service
+Wants=spice-vdagentd.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/virtualbuddy-resolution --monitor
+Restart=on-failure
+RestartSec=5
+
+# Only run on X11 sessions (Wayland handles resolution natively)
+ExecCondition=/bin/sh -c '[ -n "$DISPLAY" ]'
+
+[Install]
+WantedBy=graphical-session.target

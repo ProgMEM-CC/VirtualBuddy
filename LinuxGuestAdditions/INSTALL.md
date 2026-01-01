@@ -1,19 +1,26 @@
 # VirtualBuddy Linux Guest Additions
 
-This package provides automatic filesystem resizing for Linux virtual machines running in VirtualBuddy.
-
-When you resize a disk in VirtualBuddy, the guest additions will automatically expand the partition and filesystem on the next boot.
+This package provides automatic filesystem resizing and dynamic display resolution for Linux virtual machines running in VirtualBuddy.
 
 ## Features
 
+### Disk Resize
 - **Automatic partition resize** using `growpart`
 - **LVM support** - automatically extends physical volumes and logical volumes
 - **LUKS support** - automatically resizes encrypted containers
 - **LVM on LUKS** - full support for Fedora Workstation's default layout
 - **Multiple filesystems** - supports ext4, XFS, and Btrfs
 - **Safe operation** - only runs when free space is detected
-- **Desktop notifications** - shows a notification when disk is resized (desktop environments)
-- **Colorful terminal output** - easy to follow installation and resize progress
+
+### Dynamic Display Resolution
+- **Automatic resolution switching** - resize the VM window to change guest resolution
+- **spice-vdagent integration** - works with VirtualBuddy's SPICE display protocol
+- **Fallback support** - xrandr-based fallback for protocol mismatches
+- **Multi-desktop support** - works with GNOME, KDE, and other desktop environments
+
+### User Experience
+- **Desktop notifications** - shows notifications for disk operations
+- **Colorful terminal output** - easy to follow installation and progress
 
 ## Supported Distributions
 
@@ -173,17 +180,66 @@ Or manually:
 # Disable services
 sudo systemctl disable --now virtualbuddy-growfs.service
 sudo systemctl --global disable virtualbuddy-notify.service
+sudo systemctl --global disable virtualbuddy-resolution.service
 
 # Remove files
 sudo rm /etc/systemd/system/virtualbuddy-growfs.service
 sudo rm /etc/systemd/user/virtualbuddy-notify.service
+sudo rm /etc/systemd/user/virtualbuddy-resolution.service
 sudo rm /usr/local/bin/virtualbuddy-growfs
 sudo rm /usr/local/bin/virtualbuddy-notify
+sudo rm /usr/local/bin/virtualbuddy-resolution
 sudo rm -rf /etc/virtualbuddy
 
 # Reload systemd
 sudo systemctl daemon-reload
 ```
+
+## Dynamic Display Resolution
+
+### How It Works
+
+VirtualBuddy uses the SPICE display protocol to communicate resolution changes to the guest. When you resize the VM window in VirtualBuddy:
+
+1. VirtualBuddy sends the new resolution via the SPICE agent channel
+2. The `spice-vdagent` daemon in the guest receives the request
+3. The resolution is automatically applied to your display
+
+### Requirements
+
+- **spice-vdagent** - The guest additions installer will attempt to install this automatically
+- **VirtualBuddy setting** - Enable "Automatically Configure Display" in VM settings
+
+### Manual Resolution Control
+
+If automatic resolution isn't working, you can use the included helper script:
+
+```bash
+# List available resolutions
+virtualbuddy-resolution --list
+
+# Set a specific resolution
+virtualbuddy-resolution --set 1920x1080
+
+# Auto-detect best resolution (X11 only)
+virtualbuddy-resolution --auto
+```
+
+### Desktop Environment Support
+
+| Desktop | X11 | Wayland |
+|---------|-----|---------|
+| GNOME | ✓ spice-vdagent | ✓ Native |
+| KDE Plasma | ✓ spice-vdagent | ✓ Native |
+| Xfce | ✓ spice-vdagent + fallback | N/A |
+| MATE | ✓ spice-vdagent + fallback | N/A |
+| Sway/wlroots | N/A | ✓ wlr-randr |
+
+**Note:** GNOME and KDE Plasma on Wayland handle resolution changes natively through their compositors. The fallback script is primarily for X11 sessions and non-GNOME/KDE desktops.
+
+### Known Issues
+
+Some versions of spice-vdagent may have protocol compatibility issues with the Virtualization.framework SPICE implementation. If you see errors like "invalid message size for VDAgentMonitorsConfig" in the journal, the fallback service will automatically apply an xrandr fix.
 
 ## Troubleshooting
 
@@ -258,6 +314,36 @@ If `VFree` is 0, the physical volume may not have been resized. Try running manu
 ```bash
 sudo pvresize /dev/mapper/luks-xxx  # or your PV device
 sudo lvextend -l +100%FREE /dev/mapper/fedora-root
+```
+
+### Resolution not changing
+
+1. Check if spice-vdagent is running:
+```bash
+systemctl status spice-vdagentd
+```
+
+2. Check for protocol errors:
+```bash
+journalctl -u spice-vdagentd | grep -i error
+```
+
+3. Try the manual resolution script:
+```bash
+virtualbuddy-resolution --auto
+# or
+virtualbuddy-resolution --set 1920x1080
+```
+
+4. For Wayland sessions with GNOME or KDE, resolution should work natively. If not, check your compositor settings.
+
+### Resolution fallback not working
+
+The fallback service only runs on X11 sessions. For Wayland, resolution changes are handled by the compositor.
+
+Check if the fallback service is running:
+```bash
+systemctl --user status virtualbuddy-resolution
 ```
 
 ## License

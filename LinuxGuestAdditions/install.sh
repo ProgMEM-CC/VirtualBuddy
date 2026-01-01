@@ -11,7 +11,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-VERSION="1.2.0"
+VERSION="1.3.0"
 
 # Colors for terminal output (disabled if not a TTY)
 if [[ -t 1 ]]; then
@@ -85,6 +85,85 @@ check_systemd() {
     fi
 }
 
+# Detect package manager
+detect_package_manager() {
+    if command -v dnf &>/dev/null; then
+        echo "dnf"
+    elif command -v apt-get &>/dev/null; then
+        echo "apt"
+    elif command -v pacman &>/dev/null; then
+        echo "pacman"
+    elif command -v zypper &>/dev/null; then
+        echo "zypper"
+    else
+        echo "unknown"
+    fi
+}
+
+# Install a package using the detected package manager
+install_package() {
+    local pkg_dnf="$1"
+    local pkg_apt="$2"
+    local pkg_pacman="$3"
+    local pkg_zypper="$4"
+    local pkg_manager
+    pkg_manager=$(detect_package_manager)
+
+    case "$pkg_manager" in
+        dnf)
+            dnf install -y "$pkg_dnf" 2>/dev/null || return 1
+            ;;
+        apt)
+            DEBIAN_FRONTEND=noninteractive apt-get install -y "$pkg_apt" 2>/dev/null || return 1
+            ;;
+        pacman)
+            pacman -S --noconfirm "$pkg_pacman" 2>/dev/null || return 1
+            ;;
+        zypper)
+            zypper install -y "$pkg_zypper" 2>/dev/null || return 1
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+    return 0
+}
+
+# Install spice-vdagent for dynamic resolution support
+install_spice_vdagent() {
+    log_step "Setting up dynamic resolution support..."
+
+    if command -v spice-vdagent &>/dev/null; then
+        log_success "spice-vdagent already installed"
+    else
+        log "Installing spice-vdagent..."
+        if install_package "spice-vdagent" "spice-vdagent" "spice-vdagent" "spice-vdagent"; then
+            log_success "Installed spice-vdagent"
+        else
+            log_warning "Could not install spice-vdagent automatically"
+            log_warning "For dynamic resolution, install it manually:"
+            local pkg_manager
+            pkg_manager=$(detect_package_manager)
+            case "$pkg_manager" in
+                dnf)    echo -e "  ${BOLD}sudo dnf install spice-vdagent${NC}" ;;
+                apt)    echo -e "  ${BOLD}sudo apt install spice-vdagent${NC}" ;;
+                pacman) echo -e "  ${BOLD}sudo pacman -S spice-vdagent${NC}" ;;
+                zypper) echo -e "  ${BOLD}sudo zypper install spice-vdagent${NC}" ;;
+            esac
+        fi
+    fi
+
+    # Enable spice-vdagentd service
+    if systemctl list-unit-files | grep -q spice-vdagentd; then
+        log "Enabling spice-vdagentd service..."
+        systemctl enable spice-vdagentd 2>/dev/null || true
+        systemctl start spice-vdagentd 2>/dev/null || true
+        log_success "Enabled spice-vdagentd"
+    fi
+
+    echo ""
+}
+
 check_dependencies() {
     log_step "Checking dependencies..."
     local missing=()
@@ -147,6 +226,13 @@ install_files() {
     install -m 755 "$SCRIPT_DIR/virtualbuddy-notify" /usr/local/bin/virtualbuddy-notify
     log_success "Installed virtualbuddy-notify"
 
+    # Install the resolution fallback script (if present)
+    if [[ -f "$SCRIPT_DIR/virtualbuddy-resolution" ]]; then
+        log "Installing resolution fallback script..."
+        install -m 755 "$SCRIPT_DIR/virtualbuddy-resolution" /usr/local/bin/virtualbuddy-resolution
+        log_success "Installed virtualbuddy-resolution"
+    fi
+
     # Install the systemd system service
     log "Installing systemd system service..."
     install -m 644 "$SCRIPT_DIR/virtualbuddy-growfs.service" /etc/systemd/system/virtualbuddy-growfs.service
@@ -157,6 +243,13 @@ install_files() {
     mkdir -p /etc/systemd/user
     install -m 644 "$SCRIPT_DIR/virtualbuddy-notify.service" /etc/systemd/user/virtualbuddy-notify.service
     log_success "Installed notification service"
+
+    # Install the resolution fallback user service (if present)
+    if [[ -f "$SCRIPT_DIR/virtualbuddy-resolution.service" ]]; then
+        log "Installing resolution fallback service..."
+        install -m 644 "$SCRIPT_DIR/virtualbuddy-resolution.service" /etc/systemd/user/virtualbuddy-resolution.service
+        log_success "Installed resolution service"
+    fi
 
     # Reload systemd
     log "Reloading systemd daemon..."
@@ -172,6 +265,13 @@ install_files() {
     log "Enabling notification service for desktop users..."
     systemctl --global enable virtualbuddy-notify.service 2>/dev/null || true
     log_success "Enabled notification service"
+
+    # Enable the resolution fallback service globally (if present)
+    if [[ -f /etc/systemd/user/virtualbuddy-resolution.service ]]; then
+        log "Enabling resolution fallback service..."
+        systemctl --global enable virtualbuddy-resolution.service 2>/dev/null || true
+        log_success "Enabled resolution service"
+    fi
 
     # Write version file for update detection
     mkdir -p /etc/virtualbuddy
@@ -226,9 +326,10 @@ show_banner() {
     echo -e "${BLUE}${BOLD}║          VirtualBuddy Linux Guest Additions v$VERSION          ║${NC}"
     echo -e "${BLUE}${BOLD}╚══════════════════════════════════════════════════════════════╝${NC}"
     echo ""
-    echo "This will install automatic disk resize support for your VM."
-    echo "When you resize the disk in VirtualBuddy, the filesystem will"
-    echo "automatically expand on the next boot."
+    echo "This will install:"
+    echo "  • Automatic disk resize support"
+    echo "  • Dynamic display resolution (resize VM window to change resolution)"
+    echo "  • Desktop notifications for disk operations"
     echo ""
 }
 
@@ -237,6 +338,7 @@ main() {
     check_root
     check_systemd
     check_dependencies
+    install_spice_vdagent
     install_files
     show_status
     run_now
