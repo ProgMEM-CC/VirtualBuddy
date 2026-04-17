@@ -1,0 +1,17 @@
+[Unit]
+Description=VirtualBuddy Guest Additions - Resolution Fallback Monitor
+Documentation=https://github.com/insidegui/VirtualBuddy
+After=graphical-session.target spice-vdagentd.service
+Wants=spice-vdagentd.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/virtualbuddy-resolution --monitor
+Restart=on-failure
+RestartSec=5
+
+# Run on X11 or Wayland sessions (KDE Wayland needs fallback since spice-vdagent only supports GNOME Mutter)
+ExecCondition=/bin/sh -c '[ -n "$DISPLAY" ] || [ -n "$WAYLAND_DISPLAY" ]'
+
+[Install]
+WantedBy=graphical-session.target
