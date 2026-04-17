@@ -23,16 +23,9 @@ jobs:
           sed -i '' 's/^VB_BUNDLE_ID_PREFIX *= *.*/VB_BUNDLE_ID_PREFIX = com.github.actions/g' VirtualBuddy/Config/Signing.xcconfig || true
           echo "Updated VB_BUNDLE_ID_PREFIX"
 
-      - name: Detect Scheme
-        id: scheme
+      - name: Set Scheme (FIXED)
         run: |
-          schemes=$(xcodebuild -list -json | ruby -e "require 'json'; puts JSON.parse(STDIN.read)['workspace']['schemes'] rescue JSON.parse(STDIN.read)['project']['schemes']")
-          echo "$schemes"
-
-          # pick scheme that is NOT Managed
-          scheme=$(echo "$schemes" | tr ' ' '\n' | grep -v Managed | head -n 1)
-          echo "scheme=$scheme" >> $GITHUB_OUTPUT
-          echo "Using scheme: $scheme"
+          echo "SCHEME=VirtualBuddy" >> $GITHUB_ENV
 
       - name: Build
         run: |
@@ -41,12 +34,15 @@ jobs:
             file_to_build=$(ls -A *.xcworkspace | head -n 1)
           else
             filetype_parameter="project"
-            file_to_build=$(ls -A *.xcodeproj | head -n 1)
+            file_to_build="VirtualBuddy.xcodeproj"
           fi
 
+          echo "Building scheme: $SCHEME"
+          echo "Using file: $file_to_build"
+
           xcodebuild clean build \
-            -scheme "${{ steps.scheme.outputs.scheme }}" \
-            -"$filetype_parameter" "$file_to_build" \
+            -scheme "$SCHEME" \
+            -project "$file_to_build" \
             -configuration Release \
             -derivedDataPath build \
             CODE_SIGNING_ALLOWED=NO \
