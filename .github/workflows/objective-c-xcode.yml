@@ -1,66 +1,33 @@
-name: Xcode - Build VirtualBuddy
+- name: Build
+  run: |
+    if ls *.xcworkspace 1> /dev/null 2>&1; then
+      filetype_parameter="-workspace"
+      file_to_build=$(ls -A *.xcworkspace | head -n 1)
+    else
+      filetype_parameter="-project"
+      file_to_build="VirtualBuddy.xcodeproj"
+    fi
 
-on:
-  push:
-    branches: [ "main" ]
-  pull_request:
-    branches: [ "main" ]
-  workflow_dispatch:
+    xcodebuild clean build \
+      $filetype_parameter "$file_to_build" \
+      -scheme "$SCHEME" \
+      -configuration Release \
+      -derivedDataPath build \
+      CODE_SIGNING_ALLOWED=NO
 
-jobs:
-  build:
-    runs-on: macos-latest
+- name: Locate .app
+  run: |
+    APP_PATH=$(find build -type d -name "VirtualBuddy.app" | head -n 1)
+    echo "APP_PATH=$APP_PATH" >> $GITHUB_ENV
+    echo "Found app at $APP_PATH"
 
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+- name: Package .app
+  run: |
+    mkdir -p artifacts
+    cp -R "$APP_PATH" artifacts/
 
-      - name: Select Xcode 16
-        run: sudo xcode-select -s /Applications/Xcode_16.app
-
-      - name: Set Bundle ID Prefix
-        run: |
-          sed -i '' 's/^VB_BUNDLE_ID_PREFIX *= *.*/VB_BUNDLE_ID_PREFIX = com.github.actions/g' VirtualBuddy/Config/Signing.xcconfig || true
-          echo "Updated VB_BUNDLE_ID_PREFIX"
-
-      - name: Set Scheme (FIXED)
-        run: |
-          echo "SCHEME=VirtualBuddy" >> $GITHUB_ENV
-
-      - name: Build
-        run: |
-          if ls *.xcworkspace 1> /dev/null 2>&1; then
-            filetype_parameter="workspace"
-            file_to_build=$(ls -A *.xcworkspace | head -n 1)
-          else
-            filetype_parameter="project"
-            file_to_build="VirtualBuddy.xcodeproj"
-          fi
-
-          echo "Building scheme: $SCHEME"
-          echo "Using file: $file_to_build"
-
-          xcodebuild clean build \
-            -scheme "$SCHEME" \
-            -project "$file_to_build" \
-            -configuration Release \
-            -derivedDataPath build \
-            CODE_SIGNING_ALLOWED=NO \
-            | xcpretty
-
-      - name: Locate .app
-        run: |
-          APP_PATH=$(find build -type d -name "VirtualBuddy.app" | head -n 1)
-          echo "APP_PATH=$APP_PATH" >> $GITHUB_ENV
-          echo "Found app at $APP_PATH"
-
-      - name: Package .app
-        run: |
-          mkdir -p artifacts
-          cp -R "$APP_PATH" artifacts/
-
-      - name: Upload Artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: app
-          path: build/Build/Products/Release/VirtualBuddy.app
+- name: Upload Artifact
+  uses: actions/upload-artifact@v4
+  with:
+    name: app
+    path: artifacts/
