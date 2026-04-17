@@ -1,0 +1,64 @@
+name: xc?
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build and analyze + export app
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set Default Scheme
+        run: |
+          scheme_list=$(xcodebuild -list -json | tr -d "\n")
+          default=$(echo $scheme_list | ruby -e "require 'json'; puts JSON.parse(STDIN.gets)['project']['targets'][0]")
+          echo $default > default
+          echo "Using default scheme: $default"
+
+      - name: Build
+        env:
+          scheme: default
+        run: |
+          if [ "$scheme" = "default" ]; then scheme=$(cat default); fi
+
+          if ls *.xcworkspace 1> /dev/null 2>&1; then
+            filetype_parameter="workspace"
+            file_to_build=$(ls -A *.xcworkspace | head -n 1)
+          else
+            filetype_parameter="project"
+            file_to_build=$(ls -A *.xcodeproj | head -n 1)
+          fi
+
+          echo "Building $file_to_build with scheme $scheme"
+
+          xcodebuild clean build analyze \
+            -scheme "$scheme" \
+            -"$filetype_parameter" "$file_to_build" \
+            -configuration Release \
+            -derivedDataPath build \
+            | xcpretty
+
+      - name: Locate .app
+        run: |
+          APP_PATH=$(find build -type d -name "*.app" | head -n 1)
+          echo "APP_PATH=$APP_PATH" >> $GITHUB_ENV
+          echo "Found app at $APP_PATH"
+
+      - name: Package .app
+        run: |
+          mkdir -p artifacts
+          cp -R "$APP_PATH" artifacts/
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: app
+          path: artifacts/
