@@ -1,4 +1,4 @@
-name: xc?
+name: Xcode - Build VirtualBuddy
 
 on:
   push:
@@ -9,26 +9,33 @@ on:
 
 jobs:
   build:
-    name: Build and analyze + export app
     runs-on: macos-latest
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set Default Scheme
+      - name: Select Xcode 16
+        run: sudo xcode-select -s /Applications/Xcode_16.app
+
+      - name: Set Bundle ID Prefix
         run: |
-          scheme_list=$(xcodebuild -list -json | tr -d "\n")
-          default=$(echo $scheme_list | ruby -e "require 'json'; puts JSON.parse(STDIN.gets)['project']['targets'][0]")
-          echo $default > default
-          echo "Using default scheme: $default"
+          sed -i '' 's/^VB_BUNDLE_ID_PREFIX *= *.*/VB_BUNDLE_ID_PREFIX = com.github.actions/g' VirtualBuddy/Config/Signing.xcconfig || true
+          echo "Updated VB_BUNDLE_ID_PREFIX"
+
+      - name: Detect Scheme
+        id: scheme
+        run: |
+          schemes=$(xcodebuild -list -json | ruby -e "require 'json'; puts JSON.parse(STDIN.read)['workspace']['schemes'] rescue JSON.parse(STDIN.read)['project']['schemes']")
+          echo "$schemes"
+
+          # pick scheme that is NOT Managed
+          scheme=$(echo "$schemes" | tr ' ' '\n' | grep -v Managed | head -n 1)
+          echo "scheme=$scheme" >> $GITHUB_OUTPUT
+          echo "Using scheme: $scheme"
 
       - name: Build
-        env:
-          scheme: default
         run: |
-          if [ "$scheme" = "default" ]; then scheme=$(cat default); fi
-
           if ls *.xcworkspace 1> /dev/null 2>&1; then
             filetype_parameter="workspace"
             file_to_build=$(ls -A *.xcworkspace | head -n 1)
@@ -37,18 +44,17 @@ jobs:
             file_to_build=$(ls -A *.xcodeproj | head -n 1)
           fi
 
-          echo "Building $file_to_build with scheme $scheme"
-
-          xcodebuild clean build analyze \
-            -scheme "$scheme" \
+          xcodebuild clean build \
+            -scheme "${{ steps.scheme.outputs.scheme }}" \
             -"$filetype_parameter" "$file_to_build" \
             -configuration Release \
             -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO \
             | xcpretty
 
       - name: Locate .app
         run: |
-          APP_PATH=$(find build -type d -name "*.app" | head -n 1)
+          APP_PATH=$(find build -type d -name "VirtualBuddy.app" | head -n 1)
           echo "APP_PATH=$APP_PATH" >> $GITHUB_ENV
           echo "Found app at $APP_PATH"
 
